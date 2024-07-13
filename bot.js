@@ -1,4 +1,6 @@
 const { Client, Intents, MessageEmbed } = require('discord.js');
+const { REST } = require('@discordjs/rest');
+const { Routes } = require('discord-api-types/v9');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const path = require('path');
@@ -32,31 +34,86 @@ client.once('ready', async () => {
   await initDb();
   console.log(`Logged in as ${client.user.tag}`);
   setInterval(resetLimits, 7 * 24 * 60 * 60 * 1000); // Reset limits every week
+  registerCommands();
 });
 
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  const [command, ...args] = message.content.split(' ');
+const commands = [
+  {
+    name: 'addlink',
+    description: 'Adds a new link to the database',
+    options: [
+      {
+        name: 'url',
+        type: 'STRING',
+        description: 'The URL of the link',
+        required: true
+      }
+    ]
+  },
+  {
+    name: 'reportlink',
+    description: 'Reports a link',
+    options: [
+      {
+        name: 'id',
+        type: 'INTEGER',
+        description: 'The ID of the link',
+        required: true
+      }
+    ]
+  },
+  {
+    name: 'getlink',
+    description: 'Gets a link based on your role and limit'
+  },
+  {
+    name: 'reset',
+    description: 'Resets the link limits for everyone (Admin only)'
+  },
+  {
+    name: 'resetuser',
+    description: 'Resets the link limit for a specific user (Admin only)',
+    options: [
+      {
+        name: 'user',
+        type: 'USER',
+        description: 'The user to reset',
+        required: true
+      }
+    ]
+  }
+];
 
-  if (command === '!addlink') {
-    if (args.length !== 1) {
-      return message.reply('Please provide a single URL.');
-    }
-    const url = args[0];
+const registerCommands = async () => {
+  const rest = new REST({ version: '9' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    console.log('Started refreshing application (/) commands.');
+
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands }
+    );
+
+    console.log('Successfully reloaded application (/) commands.');
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isCommand()) return;
+
+  const { commandName, options } = interaction;
+
+  if (commandName === 'addlink') {
+    const url = options.getString('url');
     await db.run('INSERT INTO links (url) VALUES (?)', [url]);
-    message.reply(`Link ${url} added.`);
-  }
-
-  if (command === '!reportlink') {
-    if (args.length !== 1) {
-      return message.reply('Please provide a link ID.');
-    }
-    const linkId = parseInt(args[0], 10);
+    await interaction.reply(`Link ${url} added.`);
+  } else if (commandName === 'reportlink') {
+    const linkId = options.getInteger('id');
     await db.run('UPDATE links SET reported = reported + 1 WHERE id = ?', [linkId]);
-    message.reply(`Link ${linkId} has been reported.`);
-  }
-
-  if (command === '!getlink') {
+    await interaction.reply(`Link ${linkId} has been reported.`);
+  } else if (commandName === 'getlink') {
     const roleLimits = {
       'link access': 3,
       'level 10': 4,
@@ -64,37 +121,41 @@ client.on('messageCreate', async (message) => {
       'level 50': 6,
     };
 
-    const userRoles = message.member.roles.cache.map(role => role.name.toLowerCase());
+    const userRoles = interaction.member.roles.cache.map(role => role.name.toLowerCase());
     const maxLinks = Math.max(...userRoles.map(role => roleLimits[role] || 0), 0);
 
-    const user = await db.get('SELECT * FROM user_links WHERE user_id = ?', [message.author.id]);
+    const user = await db.get('SELECT * FROM user_links WHERE user_id = ?', [interaction.user.id]);
 
     if (user && user.link_count >= maxLinks) {
-      return message.reply('You have reached your weekly limit for links.');
+      await interaction.reply('You have reached your weekly limit for links.');
+      return;
     }
 
     const link = await db.get('SELECT id, url FROM links WHERE reported < 3 ORDER BY RANDOM() LIMIT 1');
 
     if (!link) {
-      return message.reply('No available links.');
+      await interaction.reply('No available links.');
+      return;
     }
 
     const embed = new MessageEmbed()
       .setTitle("Here's your link!")
       .setDescription(link.url);
 
-    await message.reply({ embeds: [embed] });
+    await interaction.reply({ embeds: [embed] });
 
     if (user) {
-      await db.run('UPDATE user_links SET link_count = link_count + 1 WHERE user_id = ?', [message.author.id]);
+      await db.run('UPDATE user_links SET link_count = link_count + 1 WHERE user_id = ?', [interaction.user.id]);
     } else {
-      await db.run('INSERT INTO user_links (user_id, link_count, last_reset) VALUES (?, 1, ?)', [message.author.id, new Date().toISOString()]);
+      await db.run('INSERT INTO user_links (user_id, link_count, last_reset) VALUES (?, 1, ?)', [interaction.user.id, new Date().toISOString()]);
     }
-  }
-
-  if (command === '!reset' && message.member.permissions.has('ADMINISTRATOR')) {
+  } else if (commandName === 'reset' && interaction.member.permissions.has('ADMINISTRATOR')) {
     await resetLimits();
-    message.reply('Link limits have been reset for everyone.');
+    await interaction.reply('Link limits have been reset for everyone.');
+  } else if (commandName === 'resetuser' && interaction.member.permissions.has('ADMINISTRATOR')) {
+    const user = options.getUser('user');
+    await db.run('UPDATE user_links SET link_count = 0 WHERE user_id = ?', [user.id]);
+    await interaction.reply(`Link limit has been reset for ${user.tag}.`);
   }
 });
 
