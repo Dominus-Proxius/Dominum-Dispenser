@@ -12,7 +12,7 @@ let db;
 
 const initDb = async () => {
   db = await open({
-    filename: path.join(__dirname, 'bot_data.db'),
+    filename: path.join(__dirname, process.env.DATABASE_PATH || 'bot_data.db'),
     driver: sqlite3.Database
   });
 
@@ -26,6 +26,10 @@ const initDb = async () => {
       user_id TEXT PRIMARY KEY,
       link_count INTEGER DEFAULT 0,
       last_reset DATE
+    );
+    CREATE TABLE IF NOT EXISTS server_settings (
+      guild_id TEXT PRIMARY KEY,
+      admin_role_id TEXT
     );
   `);
 };
@@ -78,6 +82,18 @@ const commands = [
         name: 'user',
         type: 'USER',
         description: 'The user to reset',
+        required: true
+      }
+    ]
+  },
+  {
+    name: 'setadminrole',
+    description: 'Sets the admin role for the server',
+    options: [
+      {
+        name: 'role',
+        type: 'ROLE',
+        description: 'The role to set as admin role',
         required: true
       }
     ]
@@ -149,15 +165,25 @@ client.on('interactionCreate', async interaction => {
     } else {
       await db.run('INSERT INTO user_links (user_id, link_count, last_reset) VALUES (?, 1, ?)', [interaction.user.id, new Date().toISOString()]);
     }
-  } else if (commandName === 'reset' && interaction.member.permissions.has('ADMINISTRATOR')) {
+  } else if (commandName === 'reset' && await isAdmin(interaction)) {
     await resetLimits();
     await interaction.reply('Link limits have been reset for everyone.');
-  } else if (commandName === 'resetuser' && interaction.member.permissions.has('ADMINISTRATOR')) {
+  } else if (commandName === 'resetuser' && await isAdmin(interaction)) {
     const user = options.getUser('user');
     await db.run('UPDATE user_links SET link_count = 0 WHERE user_id = ?', [user.id]);
     await interaction.reply(`Link limit has been reset for ${user.tag}.`);
+  } else if (commandName === 'setadminrole' && await isAdmin(interaction)) {
+    const role = options.getRole('role');
+    await db.run('INSERT OR REPLACE INTO server_settings (guild_id, admin_role_id) VALUES (?, ?)', [interaction.guild.id, role.id]);
+    await interaction.reply(`Admin role has been set to ${role.name}.`);
   }
 });
+
+const isAdmin = async (interaction) => {
+  const settings = await db.get('SELECT admin_role_id FROM server_settings WHERE guild_id = ?', [interaction.guild.id]);
+  const adminRoleId = settings ? settings.admin_role_id : null;
+  return adminRoleId && interaction.member.roles.cache.has(adminRoleId);
+};
 
 const resetLimits = async () => {
   await db.run('UPDATE user_links SET link_count = 0');
